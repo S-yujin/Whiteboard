@@ -2,9 +2,9 @@ import sys
 import socket
 import threading
 import json
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QSlider, QTextEdit, QLineEdit, QInputDialog, QMessageBox, QColorDialog, QFileDialog
-from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor
-from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtWidgets import *
+from PyQt5.QtGui import *
+from PyQt5.QtCore import *
 
 class WhiteboardClient(QMainWindow):
     def __init__(self):
@@ -37,6 +37,13 @@ class WhiteboardClient(QMainWindow):
         canvas_pixmap.fill(Qt.white)
         self.canvas.setPixmap(canvas_pixmap)
         main_layout.addWidget(self.canvas, 7)
+
+        #닉네임 표시 전용 플로팅 레이블
+        self.nick_label =  QLabel(self)
+        self.nick_label.setStyleSheet("background-color: rgba(255, 255, 255, 200); border: 1px solid black;")
+        self.nick_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.nick_label.hide()
+
 
         # 오른쪽: 컨트롤 패널
         control_panel = QVBoxLayout()
@@ -96,11 +103,22 @@ class WhiteboardClient(QMainWindow):
                 
                 if data['type'] == 'draw':
                     self.draw_on_canvas(data)
+                elif data['type'] == 'label':
+                    self.fix_nickname_on_canvas(data)
                 elif data['type'] == 'chat':
                     self.chat_area.append(f"<b>{data['nick']}:</b> {data['msg']}")
                 elif data['type'] == 'clear':
                     self.clear_canvas()
             except: break
+            
+    def fix_nickname_on_canvas(self, data):
+        # 캔버스(Pixmap)에 닉네임을 영구적으로 그립니다.
+        painter = QPainter(self.canvas.pixmap())
+        painter.setPen(QColor("gray")) # 과거 기록은 약간 연한 색이 보기 좋습니다.
+        painter.setFont(QFont("Arial", 9))
+        painter.drawText(data['pos'][0] + 5, data['pos'][1] - 5, data['nick'])
+        painter.end()
+        self.update()
 
     # --- 드로잉 로직 ---
     def mousePressEvent(self, e):
@@ -115,6 +133,7 @@ class WhiteboardClient(QMainWindow):
             
             data = {
                 "type": "draw",
+                "nick": self.nickname,
                 "start": [self.last_point.x(), self.last_point.y()],
                 "end": [current_point.x(), current_point.y()],
                 "color": color,
@@ -127,13 +146,54 @@ class WhiteboardClient(QMainWindow):
         if e.button() == Qt.LeftButton:
             self.drawing = False
 
+            final_pos = e.pos() - self.canvas.pos()
+            data = {
+                "type": "label",
+                "nick": self.nickname,
+                "pos": [final_pos.x(), final_pos.y()]
+            }
+            self.client.send(json.dumps(data).encode('utf-8'))
+
     def draw_on_canvas(self, data):
         painter = QPainter(self.canvas.pixmap())
+        
+        # 펜 설정
         pen = QPen(QColor(data['color']), data['width'], Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         painter.setPen(pen)
         painter.drawLine(data['start'][0], data['start'][1], data['end'][0], data['end'][1])
+
         painter.end()
+
+        # 실시간 위치 정보는 현재 펜 끝을 보여주기 위해 유지
+        self.last_user_pos = {'nick': data['nick'], 'pos': QPoint(data['end'][0], data['end'][1])}
         self.update()
+    
+    def paintEvent(self, event):
+        # 1. 기본 배경 위젯들을 먼저 그린다.
+        super().paintEvent(event)
+        
+        # 2. 닉네임 정보가 있을 때만 실행
+        if hasattr(self, 'last_user_pos'):
+            # 중요: 보드(QLabel) 위에서도 글자가 보이도록 QPainter를 창 전체에 띄우기.
+            painter = QPainter(self)
+            
+            # 3. 닉네임 스타일 (눈에 확 띄는 색상과 굵기)
+            painter.setPen(QPen(QColor("#FF0000"), 2)) # 빨간색으로 변경해서 테스트
+            painter.setFont(QFont("Arial", 11, QFont.Bold))
+            
+            # 4. 캔버스의 현재 위치를 실시간으로 계산
+            # 레이아웃 때문에 캔버스 위치가 변해도 정확히 따라가기
+            canvas_rect = self.canvas.geometry()
+            
+            # 캔버스 절대 좌표 + 마우스 상대 좌표
+            target_x = canvas_rect.x() + self.last_user_pos['pos'].x()
+            target_y = canvas_rect.y() + self.last_user_pos['pos'].y()
+
+            # 5. 닉네임 그리기 (캔버스 영역 안쪽인지 확인 후 그리기)
+            # 텍스트가 캔버스 영역보다 위에 그려지도록 강제
+            painter.drawText(target_x + 10, target_y - 10, self.last_user_pos['nick'])
+            
+            painter.end()
 
     # --- 기능 함수들 ---
     def change_color(self):
